@@ -1,0 +1,62 @@
+[codex] Starting Codex review thread.
+[codex] Thread ready (019fd2b6-344a-76f1-b996-1c51771c9180).
+[codex] Reviewer started: changes against 'main'
+[codex] Running command: /bin/zsh -lc "git status --short && printf '\\n--- DIFF STAT ---\\n' && git diff --stat 65e78...
+[codex] Running command: /bin/zsh -lc "command -v git; type git; ls -l /usr/bin/git; /usr/bin/git --version; env | gre...
+[codex] Command completed: /bin/zsh -lc "command -v git; type git; ls -l /usr/bin/git; /usr/bin/git --version; env | gre... (exit 0)
+[codex] Running command: /bin/zsh -lc 'git --no-optional-locks diff --stat 65e78c70f6b194fadb37a48dcacdcbd30a4a80cb 2>...
+[codex] Command completed: /bin/zsh -lc 'git --no-optional-locks diff --stat 65e78c70f6b194fadb37a48dcacdcbd30a4a80cb 2>... (exit 0)
+[codex] Command completed: /bin/zsh -lc "git status --short && printf '\\n--- DIFF STAT ---\\n' && git diff --stat 65e78... (exit 0)
+[codex] Running command: /bin/zsh -lc "printf '%s\\n' '--- STATUS ---'; git --no-optional-locks status --short 2>/dev/...
+[codex] Command completed: /bin/zsh -lc "printf '%s\\n' '--- STATUS ---'; git --no-optional-locks status --short 2>/dev/... (exit 0)
+[codex] Running command: /bin/zsh -lc "printf '%s\\n' '--- TREE ---'; find . -maxdepth 3 -type f | sort; printf '%s\\n...
+[codex] Command completed: /bin/zsh -lc "printf '%s\\n' '--- TREE ---'; find . -maxdepth 3 -type f | sort; printf '%s\\n... (exit 0)
+[codex] Running command: /bin/zsh -lc "nl -ba CLAUDE.md; printf '\\n--- changed line nums ---\\n'; nl -ba src/app.ts; ...
+[codex] Command completed: /bin/zsh -lc "nl -ba CLAUDE.md; printf '\\n--- changed line nums ---\\n'; nl -ba src/app.ts; ... (exit 0)
+[codex] Running command: /bin/zsh -lc 'npm test -- --runInBand'
+[codex] Running command: /bin/zsh -lc 'npm run typecheck'
+[codex] Command failed: /bin/zsh -lc 'npm test -- --runInBand' (exit 1)
+[codex] Command completed: /bin/zsh -lc 'npm run typecheck' (exit 0)
+[codex] Running command: /bin/zsh -lc 'npm test'
+[codex] Command failed: /bin/zsh -lc 'npm test' (exit 1)
+[codex] Running command: /bin/zsh -lc "node --import tsx --no-warnings --input-type=module -e 'import {createDb,seedUs...
+[codex] Command completed: /bin/zsh -lc "node --import tsx --no-warnings --input-type=module -e 'import {createDb,seedUs... (exit 0)
+[codex] Running command: /bin/zsh -lc 'grep -R "enableForeignKeyConstraints" -n node_modules/@types/node/sqlite.d.ts $...
+[codex] Command completed: /bin/zsh -lc 'grep -R "enableForeignKeyConstraints" -n node_modules/@types/node/sqlite.d.ts $... (exit 0)
+[codex] Running command: /bin/zsh -lc "sed -n '45,78p' node_modules/@types/node/sqlite.d.ts; git log --oneline --decor...
+[codex] Command completed: /bin/zsh -lc "sed -n '45,78p' node_modules/@types/node/sqlite.d.ts; git log --oneline --decor... (exit 0)
+[codex] Review output captured.
+[codex] Reviewer finished.
+[codex] Assistant message captured: 共有先一覧の認可漏れと認証トークンのログ出力があり、タグ付け・共有後は既存のタスク削除も失敗します。ページネーションにもオフセット計算と入力検証の不具合があるため、このままでは正しい変更...
+[codex] Turn completed.
+# Codex Review
+
+Target: branch diff against main
+
+共有先一覧の認可漏れと認証トークンのログ出力があり、タグ付け・共有後は既存のタスク削除も失敗します。ページネーションにもオフセット計算と入力検証の不具合があるため、このままでは正しい変更とは判断できません。
+
+Full review comments:
+
+- [P1] 共有先一覧を所有者だけに制限する — /Users/masuyama/ghq/github.com/tomada1114/cc-lab/src/tasks.ts:259-259
+  この取得だけ `user_id` を条件にしていないため、無関係な認証済みユーザーでも連番のタスク ID を指定すれば、他人のタスク本文と共有先ユーザー ID を取得できます。ほかのタスク操作と同様に、現在のユーザーを使って所有権を確認してください。
+
+- [P1] 関連レコードを連鎖削除できるようにする — /Users/masuyama/ghq/github.com/tomada1114/cc-lab/src/db.ts:55-62
+  タグ付けまたは共有したタスクを `DELETE /tasks/:id` で削除すると、Node の `DatabaseSync` では既定で外部キー制約が有効なため `FOREIGN KEY constraint failed` となり 500 が返ります。`task_tags.task_id` と `task_shares.task_id` に `ON DELETE CASCADE` を設定するなど、既存の削除 API と整合する削除方針が必要です。
+
+- [P1] Authorization ヘッダーをログに出力しない — /Users/masuyama/ghq/github.com/tomada1114/cc-lab/src/app.ts:30-30
+  想定外エラーが起きるたびに完全な Bearer トークンがログへ保存され、ログ閲覧者がその値でユーザーになりすませます。この変更では `GET /tasks?limit=abc` のような入力でも容易にこの経路へ到達するため、Authorization は削除するか必ずマスクしてください。
+
+- [P2] 1始まりのページを正しいオフセットに変換する — /Users/masuyama/ghq/github.com/tomada1114/cc-lab/src/tasks.ts:46-46
+  README とコメントでは `page` が1始まりですが、`page * limit` では第1ページから `limit` 件を飛ばします。たとえば3件ある状態の `/tasks?limit=2` は最初の2件ではなく3件目だけを返すため、オフセットは `(page - 1) * limit` にする必要があります。
+
+- [P2] 不正なページネーション値をSQLへ渡さない — /Users/masuyama/ghq/github.com/tomada1114/cc-lab/src/tasks.ts:44-45
+  `page` と `limit` を検証せず数値化しているため、`limit=abc` や小数値では SQLite が `datatype mismatch` を投げて 500 になり、負数や0ではページネーション契約を逸脱します。SQL実行前に正の整数であることを検証して 400 を返してください。ルートの `AGENTS.md`「セキュリティの考え方」にある「すべての外部入力を検証」にも反します。
+
+- [P2] 自分自身へのタスク共有を拒否する — /Users/masuyama/ghq/github.com/tomada1114/cc-lab/src/tasks.ts:227-228
+  `targetUserId === user.id` の確認がないため、所有者自身を指定すると201で共有が作成され、そのタスクが「自分に共有されたタスク」に現れます。README とルートの説明はいずれも他ユーザーへの共有としているため、自分自身の ID は検証段階で拒否してください。
+
+- [P2] タグ取得エラーを空配列として握りつぶさない — /Users/masuyama/ghq/github.com/tomada1114/cc-lab/src/tags.ts:44-45
+  タグテーブルの不整合やDB入出力エラーが起きても例外をすべて捕捉して200と空のタグ一覧を返すため、クライアントは「タグが存在しない」と誤認し、障害も観測できません。エラーを上位のハンドラへ伝播させるか、少なくとも原因を区別して処理してください。ルートの `AGENTS.md`「エラーハンドリングの原則」の「try-catch で握りつぶさず根本原因を修正」にも反します。
+
+- [P2] タグ取得のN+1クエリを避ける — /Users/masuyama/ghq/github.com/tomada1114/cc-lab/src/tasks.ts:75-77
+  一覧の各タスクごとに同期SQLiteクエリを追加しているため、ページネーションなしの大量タスク取得では1回のリクエストが `1 + N` クエリとなり、イベントループを長時間ブロックします。対象タスクのタグを一括取得するかJOINでまとめてください。ルートの `AGENTS.md`「パフォーマンスの意識」にある「N+1問題を避ける」にも反します。

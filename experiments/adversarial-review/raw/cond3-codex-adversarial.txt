@@ -1,0 +1,44 @@
+[codex] Starting Codex task thread.
+[codex] Starting Codex task thread.
+[codex] Thread ready (019fd2b6-48a6-7b60-8f78-4ef0f90ac533).
+[codex] Turn started (019fd2b6-4c93-7750-a55f-ccea6309091c).
+[codex] Assistant message captured: {"verdict":"approve","summary":"差分と関連する認証・DB境界を読み取り、テストでは見落とされやすい権限分離、部分失敗、ページネーションの破綻を優先して確認...
+[codex] Running command: /bin/zsh -lc 'git status --short && git diff --find-renames --find-copies main...HEAD -- READ...
+[codex] Running command: /bin/zsh -lc 'command -v git; /usr/bin/git --version; /usr/bin/git diff --no-ext-diff --unifi...
+[codex] Command completed: /bin/zsh -lc 'command -v git; /usr/bin/git --version; /usr/bin/git diff --no-ext-diff --unifi... (exit 0)
+[codex] Command completed: /bin/zsh -lc 'git status --short && git diff --find-renames --find-copies main...HEAD -- READ... (exit 0)
+[codex] Running command: /bin/zsh -lc "/usr/bin/git diff --no-ext-diff --unified=60 main...HEAD -- src/app.ts src/db.t...
+[codex] Command completed: /bin/zsh -lc "/usr/bin/git diff --no-ext-diff --unified=60 main...HEAD -- src/app.ts src/db.t... (exit 0)
+[codex] Assistant message captured: {"verdict":"needs-attention","summary":"現時点で出荷阻止級の認可欠落と資格情報漏えいを確認しました。加えて、1始まりと明記されたページネーションが...
+[codex] Running command: /bin/zsh -lc "node -e \"const {DatabaseSync}=require('node:sqlite'); const d=new DatabaseSync...
+[codex] Command completed: /bin/zsh -lc "node -e \"const {DatabaseSync}=require('node:sqlite'); const d=new DatabaseSync... (exit 0)
+[codex] Running command: /bin/zsh -lc "node --experimental-strip-types --input-type=module -e \"import('./src/db.ts')....
+[codex] Command completed: /bin/zsh -lc "node --experimental-strip-types --input-type=module -e \"import('./src/db.ts').... (exit 0)
+[codex] Assistant message captured: {"verdict":"needs-attention","summary":"出荷不可。テナント境界を越える情報漏えい、Bearerトークンの記録、共有済みタスクを削除できない整合性欠...
+[codex] Turn completion inferred after the main thread finished and subagent work drained.
+# Codex Adversarial Review
+
+Target: branch diff against main
+Verdict: needs-attention
+
+出荷不可。テナント境界を越える情報漏えい、Bearerトークンの記録、共有済みタスクを削除できない整合性欠陥、ページ欠落があります。
+
+Findings:
+- [critical] 任意ユーザーが他人のタスクと共有先を取得できる (src/tasks.ts:253-268)
+  GET /tasks/:id/shares は認証されているだけで、要求者が所有者か確認せずID指定されたタスク本体と共有先を返します。連番IDを列挙すれば、タイトル、説明、期限、共有相手のユーザーIDをテナント境界を越えて取得できます。
+  Recommendation: c.get('user') と getTaskForUser() で所有権を検証し、所有者以外には404を返してください。別ユーザーによる拒否を検証するテストも追加してください。
+- [high] 例外発生時にBearerトークンがログへ漏えいする (src/app.ts:26-32)
+  onError が Authorization ヘッダー全体を平文で出力します。未処理例外を踏んだユーザーの再利用可能な資格情報が、ログ基盤やログ閲覧者へ漏えいし、アカウントの乗っ取りにつながります。
+  Recommendation: Authorizationをログから完全に除外してください。追跡には相関IDと、取得可能な場合のみ認証済みuser.idを使用してください。
+- [high] タグ付け・共有後のタスク削除が外部キー制約で失敗する (src/db.ts:54-64)
+  task_tags と task_shares の外部キーに ON DELETE CASCADE がありません。node:sqliteでは外部キー制約が有効なため、関連行があるタスクのDELETEは500になります。特に共有解除APIも存在しないため、一度共有したタスクはAPI経由では削除不能です。
+  Recommendation: 関連外部キーへON DELETE CASCADEを設定するマイグレーションを用意するか、トランザクション内で関連行を削除してからタスクを削除してください。タグ付き・共有済みタスクの削除テストも追加してください。
+- [medium] 1ページ目が先頭のlimit件を恒常的に飛ばす (src/tasks.ts:43-60)
+  pageは1始まりで既定値も1ですが、offsetをpage * limitで計算しています。そのためGET /tasks?limit=2は先頭2件を返さず、3件目から始まります。現在のテストは件数の上限しか検証せず、この欠落を検出できません。
+  Recommendation: offsetを(page - 1) * limitに修正し、pageとlimitを正の整数として検証してください。各ページの具体的なID順序を検証するテストを追加してください。
+
+Next steps:
+- 認可修正後、別ユーザーによるID列挙テストを追加する。
+- 共有済み・タグ付きタスクの削除とロールバック動作を検証する。
+- ログから資格情報が除外されることをテストする。
+- ページ境界、無効値、過大limitを含むページネーションテストを追加する。

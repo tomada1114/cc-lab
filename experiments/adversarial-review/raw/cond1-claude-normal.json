@@ -1,0 +1,115 @@
+{
+  "summary": "タグ付け・共有・ページネーションの追加自体は既存の設計（DI された DatabaseSync、Hono のルート分割、user_id によるスコープ確認）に沿っているが、実際に動かして確認したところ本番相当の欠陥が複数ある。特に (1) 新テーブルの外部キーに ON DELETE CASCADE がなく既存の DELETE /tasks/:id が 500 で壊れる、(2) GET /tasks/:id/shares に所有者チェックがなく他人のタスク本文を読める、(3) OFFSET の計算が page*limit で 1 ページ目が返らない、の 3 点は実行して再現済み。加えて認証トークンをエラーログに平文出力しており、追加テストは off-by-one を検出できない緩いアサーションになっている。",
+  "findings": [
+    {
+      "file": "src/db.ts",
+      "line_start": 54,
+      "line_end": 65,
+      "title": "task_tags / task_shares の外部キーに ON DELETE CASCADE がなく、既存の DELETE /tasks/:id が壊れる",
+      "what_can_go_wrong": "新設した task_tags.task_id / task_shares.task_id は tasks(id) を REFERENCES しているが ON DELETE CASCADE がなく、src/tasks.ts:154-169 の DELETE ハンドラも子テーブルを消していない。node:sqlite の DatabaseSync は PRAGMA foreign_keys がデフォルトで ON（実測で foreign_keys=1 を確認）なので、タグが1つでも付いている、あるいは誰かに共有されているタスクを削除すると 'FOREIGN KEY constraint failed' が投げられる。実際に叩いて DELETE /tasks/1（タグ付き）と DELETE /tasks/2（共有済み）がいずれも 500 を返し、タスクが DB に残ったままになることを確認した。",
+      "impact": "この PR 以前は正常に動いていた削除 API が、タグ付け・共有機能を使った瞬間に恒久的に失敗する既存機能のリグレッション。ユーザーはタグを付けたタスクを二度と削除できず、レスポンスは 500（内部エラー）なので原因も分からない。既存の tests/tasks.test.ts はタグなしタスクしか削除しないため CI は緑のまま通過する。",
+      "severity": "critical",
+      "confidence": 0.99,
+      "recommendation": "task_tags.task_id と task_shares.task_id の REFERENCES に ON DELETE CASCADE を付ける（task_shares.shared_with_user_id も同様に方針を決める）。既存 DB があるなら SQLite は制約変更にテーブル再作成が必要なのでマイグレーションを用意する。あるいは DELETE ハンドラ側で tasks の削除と同一トランザクション内で task_tags / task_shares を先に削除する。いずれの場合も『タグ付きタスクを削除して 204 が返る』『共有済みタスクを削除して 204 が返る』テストを追加する。"
+    },
+    {
+      "file": "src/tasks.ts",
+      "line_start": 253,
+      "line_end": 269,
+      "title": "GET /tasks/:id/shares に所有者チェックがなく、他ユーザーのタスク本文と共有先が読める（IDOR）",
+      "what_can_go_wrong": "他のハンドラ（:id/tags、:id/shares の POST、GET /:id など）はすべて getTaskForUser(db, id, user.id) で user_id を条件に入れているのに、このハンドラだけ 'SELECT * FROM tasks WHERE id = ?' と user_id 条件なしで引いており、c.get('user') すら参照していない。そのうえレスポンスに task 行をまるごと含めている。実測で、bob のトークンで GET /tasks/1/shares を叩くと alice のタスクが 200 で返る（同じ ID に対する GET /tasks/1 は正しく 404）ことを確認した。",
+      "impact": "認証済みユーザーなら誰でも、ID を 1 から総当たりするだけで他人のタスクの title / description / status / due_at と共有先ユーザー ID の一覧を列挙できる。マルチテナント境界の破れで、権限昇格を伴わない情報漏洩。他エンドポイントが正しく 404 を返すぶん、このパスだけが抜け道になっている。",
+      "severity": "critical",
+      "confidence": 0.98,
+      "recommendation": "他のハンドラと同じく const user = c.get('user') を取り、const task = getTaskForUser(db, id, user.id) に置き換えて、見つからなければ 404 を返す。共有された側にも共有先一覧を見せる仕様にするなら、task_shares に自分の行があるかも合わせて確認する明示的な条件を書く。合わせて『他人のタスクの /shares は 404』という否定テストを追加する。"
+    },
+    {
+      "file": "src/tasks.ts",
+      "line_start": 43,
+      "line_end": 46,
+      "title": "OFFSET の計算が page * limit で、1 ページ目が絶対に返らない off-by-one",
+      "what_can_go_wrong": "page は README（『page は 1 始まり』）と 34-35 行目のコメント、および DEFAULT_PAGE = 1 のとおり 1 始まりなのに、offset を (page - 1) * limit ではなく page * limit で計算している。結果として page=1 は先頭 limit 件を丸ごと飛ばした 2 ページ目相当を返し、先頭ページには page=0（仕様外の値）でしかアクセスできない。実測で、タスク A〜E がある状態の GET /tasks?limit=2 と ?limit=2&page=1 がいずれも C, D を返し、A, B が取得不能であることを確認した。page 未指定でも DEFAULT_PAGE=1 なので同じく先頭が消える。",
+      "impact": "ページネーションを使うクライアントは常に先頭 limit 件を見失う。件数の少ないユーザー（総件数 <= limit）では一覧が完全に空に見える。ページ送りの総件数も合わなくなり、データが消えたというユーザー報告につながるサイレントなデータ欠落。",
+      "severity": "high",
+      "confidence": 0.99,
+      "recommendation": "const offset = (page - 1) * limit; に修正し、page < 1 は 1 に丸める（または 400 を返す）。テストは『?limit=2&page=1 が先頭 2 件を返す』『page=2 が 3〜4 件目を返す』『ページ間で重複・欠落がない』ところまで具体的な id で検証する。"
+    },
+    {
+      "file": "src/app.ts",
+      "line_start": 26,
+      "line_end": 34,
+      "title": "onError が Authorization ヘッダ（Bearer トークン）を平文でログ出力している",
+      "what_can_go_wrong": "エラーハンドラが c.req.header('Authorization') をそのまま console.error に渡している。このトークンは src/auth.ts:22-23 で users.token と突き合わせる長期有効な認証情報そのもので、失効・ローテーションの仕組みもない。実測でも、DELETE /tasks/1 が FK 制約で落ちた際に \"authorization: 'Bearer a'\" がログに出力された。しかも上の FK バグや limit=abc の 500 のように、通常操作で容易に到達するエラーパスから発火する。",
+      "impact": "標準出力を収集するログ基盤（CloudWatch、Datadog、コンテナログなど）に生の認証トークンが残り、ログ閲覧権限しか持たない人物がユーザーになりすませる。ログのアクセス制御はふつうシークレット並みではないため、認証情報の実効的な権限境界が壊れる。",
+      "severity": "high",
+      "confidence": 0.95,
+      "recommendation": "authorization フィールドをログから外す。リクエストの紐付けが目的なら、認証済みユーザー ID（c.get('user')?.id）かリクエスト ID を出す。どうしてもトークン由来の識別子が要るならハッシュの先頭数文字に留める。"
+    },
+    {
+      "file": "src/tasks.ts",
+      "line_start": 43,
+      "line_end": 46,
+      "title": "limit / page がまったく検証されておらず、500 応答とページネーション回避を招く",
+      "what_can_go_wrong": "limitParam と page は Number() に通すだけで、NaN・負数・非整数・上限のいずれもチェックしていない。実測で以下を確認した: (a) ?limit=abc は NaN を SQLite にバインドして 'datatype mismatch' が投げられ 500 になる（onError 経由でトークンもログに出る）。(b) ?limit=-1 は SQLite の仕様で LIMIT 負数＝無制限となり全件返る。つまり任意のクライアントがページネーションを無効化できる。(c) ?page=1.5 は端数の OFFSET になり、ページ境界がずれた結果を返す。",
+      "impact": "不正なクエリ文字列で 500 を誘発できる（可用性・ノイズの問題であり、上のトークンログ漏洩の引き金でもある）。limit=-1 や巨大な limit は全行取得＋後述の N+1 タグ取得を招き、DB とレスポンスサイズの両面でリソース枯渇の手段になる。",
+      "severity": "high",
+      "confidence": 0.95,
+      "recommendation": "limit と page をパースした直後に検証する。Number.isInteger かつ limit >= 1 かつ limit <= MAX_LIMIT（例: 100）、page >= 1 を満たさない場合は 400 を返す。クランプする方針なら、その挙動を README に明記する。"
+    },
+    {
+      "file": "src/tasks.ts",
+      "line_start": 226,
+      "line_end": 235,
+      "title": "共有先 user_id の型検証が Number() 任せで、真偽値が ID 1 に化ける",
+      "what_can_go_wrong": "body.user_id を検証前に Number() へ通しているため、JSON の非数値が黙って数値に変換される。Number(true) === 1 で Number.isInteger を通過し、findUserById(1) が存在すればそのまま共有が成立する。実測で {\"user_id\": true} を POST /tasks/1/shares に送ると 201 が返り、shared_with_user_id=1 の共有が作られることを確認した。同様に Number(null) や Number([]) は 0 になり、エラーメッセージが 'user_id is required' ではなく 'target user not found' として返る。",
+      "impact": "クライアントのバグや型の緩い呼び出し元が、意図しないユーザー（多くの場合 ID 1 = 最初に作られた管理者的なユーザー）にタスクを共有してしまう。共有は情報開示なので、静かに誤った相手へ公開される。",
+      "severity": "medium",
+      "confidence": 0.9,
+      "recommendation": "変換前に型を確認する。typeof body.user_id === 'number' && Number.isInteger(body.user_id) && body.user_id > 0 を満たさなければ 400 を返す（文字列の数値を許容したいなら明示的に /^\\d+$/ で判定してから変換する）。自分自身への共有を弾くかどうかもここで決めておく。"
+    },
+    {
+      "file": "src/tasks.ts",
+      "line_start": 75,
+      "line_end": 78,
+      "title": "一覧取得でタスク件数ぶん SQL を発行する N+1（しかも毎回 prepare し直す）",
+      "what_can_go_wrong": "取得したタスクをループして 1 件ずつ getTagsForTask を呼んでおり、その中（src/tags.ts:38）で毎回 db.prepare を実行している。node:sqlite は同期 API なので、この N 回のクエリはすべてイベントループをブロックする。limit を付けない呼び出し（README では従来どおり全件を返す仕様）や、上記の limit=-1 経由では N がユーザーの全タスク数になる。",
+      "impact": "タスクが数千件あるユーザーの GET /tasks で、リクエスト 1 本がイベントループを長時間占有し、シングルスレッドのサーバ全体のレイテンシが悪化する。認証済みユーザーなら誰でも意図的に引き起こせる。",
+      "severity": "medium",
+      "confidence": 0.9,
+      "recommendation": "タグを 1 本のクエリでまとめて取る（取得したタスク ID に対する WHERE task_tags.task_id IN (...) で引き、アプリ側で task_id ごとに詰め替える）。少なくとも prepare 済みステートメントはルート構築時に一度だけ作ってループの外に出す。"
+    },
+    {
+      "file": "src/tags.ts",
+      "line_start": 34,
+      "line_end": 46,
+      "title": "getTagsForTask が全例外を握りつぶしてタグなしとして返す",
+      "what_can_go_wrong": "catch 節が例外の種類を問わず [] を返す。コメントは『タグ取得で失敗してもタスク一覧そのものは返したい』としているが、実際にここへ到達する失敗はスキーマ不整合・DB ロック・ディスク I/O エラーなど、握りつぶすと危険なものばかりで、正常系で空配列になるケースと区別が付かない。ログも出ないため発生自体が観測できない。",
+      "impact": "障害時に API が 200 とともに『タグが 1 件も付いていないタスク一覧』を返す。クライアントから見ればタグが消えたのと区別できず、それを信じてタグを付け直す・タグ絞り込みが空になるといった形でデータ品質の問題が伝播する。運用側にはアラートも痕跡も残らない。",
+      "severity": "medium",
+      "confidence": 0.85,
+      "recommendation": "try/catch を外して例外を上位に伝播させ、500 として扱う。どうしても一覧を返し続けたいなら、最低限 console.error でタスク ID とエラー内容を記録し、レスポンスでもタグが取得できなかったこと（例: tags: null とフラグ）を表現して空配列と区別できるようにする。"
+    },
+    {
+      "file": "src/db.ts",
+      "line_start": 60,
+      "line_end": 65,
+      "title": "task_shares に (task_id, shared_with_user_id) の UNIQUE 制約がなく、重複防止がアプリ側のチェックのみ",
+      "what_can_go_wrong": "重複共有の防止は src/tasks.ts:237-242 の SELECT してから INSERT するアプリ側チェックだけで、DB 側に一意制約がない。同じ SQLite ファイルを複数プロセス／複数インスタンスで共有する構成（npm start を複数立てる、将来のスケールアウト）では、SELECT と INSERT の間に別プロセスの INSERT が入り込み、同じ組み合わせの行が複数できる。",
+      "impact": "重複行ができると /shared-tasks は tasks と task_shares を JOIN しているだけなので（src/shares.ts:13-21）、同じタスクが共有一覧に重複して現れる。さらに共有解除 API を後から追加した際に『1 回消しても残る』という直しにくい不具合になる。",
+      "severity": "low",
+      "confidence": 0.8,
+      "recommendation": "task_shares に UNIQUE (task_id, shared_with_user_id) を追加し（既存の idx_task_shares_task_id は複合ユニークで代替できるか検討する）、INSERT は INSERT OR IGNORE か制約違反の捕捉で 409 を返す形にする。task_tags のように複合主キーにしてしまう手もある。"
+    },
+    {
+      "file": "tests/tags-and-sharing.test.ts",
+      "line_start": 77,
+      "line_end": 91,
+      "title": "ページネーションのテストが緩すぎて off-by-one を検出できない",
+      "what_can_go_wrong": "唯一のページネーションテストが expect(paged.tasks.length).toBeLessThanOrEqual(2) しか検証していない。この表明は返り値が 0 件でも 1 件でも、どのタスクが返っていても通るため、実際に存在する『先頭ページが飛ばされる』バグ（本レビュー 3 件目）を通過させている。実測でもテストは緑のまま、?limit=2 は 1〜2 件目ではなく 3〜4 件目を返していた。page を明示したケース、複数ページをまたぐケース、返ってきた id の検証がいずれも無い。",
+      "impact": "テストが存在することで検証済みだと誤認され、明白な仕様違反が CI をすり抜けて本番に出る。同じ穴が DELETE のリグレッション（タグ付きタスク削除）と GET /tasks/:id/shares の権限漏れにもあり、新機能のテストは正常系のみで否定系・境界系が無い。",
+      "severity": "medium",
+      "confidence": 0.95,
+      "recommendation": "返ってきたタスクの id を具体的に検証する形に書き換える（例: 5 件作って ?limit=2&page=1 が id 1,2、page=2 が 3,4、page=3 が 5 を返す）。合わせて『タグ付き／共有済みタスクの DELETE が 204』『他ユーザーのタスクへの GET /tasks/:id/shares が 404』『不正な limit が 400』の否定系テストを追加する。"
+    }
+  ]
+}
