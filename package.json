@@ -1,0 +1,27 @@
+{
+  "name": "cc-lab-task-api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "検証用サンドボックスの題材アプリ（タスク管理API）",
+  "scripts": {
+    "dev": "tsx watch --no-warnings src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.7",
+    "hono": "^4.6.14"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
