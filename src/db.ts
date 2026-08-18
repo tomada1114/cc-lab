@@ -45,6 +45,27 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_user_id ON tasks(user_id);
+
+CREATE TABLE IF NOT EXISTS tags (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS task_tags (
+  task_id INTEGER NOT NULL REFERENCES tasks(id),
+  tag_id INTEGER NOT NULL REFERENCES tags(id),
+  PRIMARY KEY (task_id, tag_id)
+);
+
+CREATE TABLE IF NOT EXISTS task_shares (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL REFERENCES tasks(id),
+  shared_with_user_id INTEGER NOT NULL REFERENCES users(id),
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_shares_task_id ON task_shares(task_id);
+CREATE INDEX IF NOT EXISTS idx_task_shares_shared_with_user_id ON task_shares(shared_with_user_id);
 `;
 
 /**
@@ -65,4 +86,9 @@ export function seedUser(db: DatabaseSyncType, name: string, token: string): Use
 export function findUserByToken(db: DatabaseSyncType, token: string): UserRow | undefined {
   const stmt = db.prepare('SELECT id, name, token FROM users WHERE token = ?');
   return stmt.get(token) as unknown as UserRow | undefined;
+}
+
+export function findUserById(db: DatabaseSyncType, id: number): UserRow | undefined {
+  const stmt = db.prepare('SELECT id, name, token FROM users WHERE id = ?');
+  return stmt.get(id) as unknown as UserRow | undefined;
 }
